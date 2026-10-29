@@ -1,9 +1,9 @@
 # İlerleme
-Son güncelleme: 2026-10-29T08:31:00Z
-Şu anki faz: F0 — Keşif ve agy protokolü doğrulama
+Son güncelleme: 2026-10-29T11:55:00Z
+Şu anki faz: F1 — Çekirdek (db, şema, durum makinesi, store'lar, CLI temeli)
 
 ## Fazlar
-- [ ] F0 — Keşif (agy protokolü, stream-json, stdin/schema/timeout testleri)
+- [x] F0 — Keşif (agy protokolü, stream-json, stdin/schema/timeout testleri, fake_agy) (commit tamamlanıyor)
 - [ ] F1 — Çekirdek (db, şema, durum makinesi, store'lar, CLI temeli)
 - [ ] F2 — Runner + Supervisor (işçi döngüsü, kira, kurtarma, K1-K3)
 - [ ] F3 — Worktree + İnceleme (git worktree, diff, iki aşamalı birleştirme, K-G6)
@@ -16,4 +16,4 @@ Son güncelleme: 2026-10-29T08:31:00Z
 - Yok
 
 ## Sonraki adım
-F0 adımı için agy davranış testlerini çalıştırıp bulguları docs/agy-protocol.md'ye kaydetmek.
+F1 fazına geçmek: `src/agentbus/db.py`, `src/agentbus/models.py`, `src/agentbus/store/*` ve temel CLI komutlarını (`init`, `submit`, `ls`, `show`) geliştirmek.
