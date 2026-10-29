@@ -588,6 +588,409 @@ def cmd_gc(args: argparse.Namespace) -> int:
     return 0
 
 
+def check_agent_role_guard(command_name: str, args: argparse.Namespace) -> bool:
+    """G8: AGENTBUS_ROLE=agent ise yetkisiz komutları engeller."""
+    role = os.environ.get("AGENTBUS_ROLE")
+    if role != "agent":
+        return True
+
+    allowed_commands = ["msg", "board", "claim", "unclaim", "show"]
+    if command_name not in allowed_commands:
+        err_console.print(f"[red]Erişim reddedildi: Ajan rolü bu komutu çalıştıramaz ({command_name} - G8 kuralı)[/red]")
+        return False
+
+    agent_job_id = os.environ.get("AGENTBUS_JOB_ID")
+    if command_name == "show":
+        if getattr(args, "job_id", None) != agent_job_id:
+            err_console.print(f"[red]Erişim reddedildi: Ajan rolü yalnızca kendi işini görüntüleyebilir (G8 kuralı)[/red]")
+            return False
+
+    return True
+
+
+def cmd_msg_send(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    messages_store = MessagesStore(conn)
+    events_store = EventsStore(conn)
+
+    sender = os.environ.get("AGENTBUS_JOB_ID") or getattr(args, "sender", None) or "orchestrator"
+    msg = messages_store.send_message(from_id=sender, to_id=args.to, body=args.body)
+    events_store.emit_event(
+        "message.sent",
+        job_id=sender if sender != "orchestrator" else None,
+        payload={"msg_id": msg.id, "from": sender, "to": args.to, "body": args.body}
+    )
+    if is_json_mode(args):
+        print(json.dumps({"status": "ok", "message_id": msg.id, "from": sender, "to": args.to, "body": args.body}, indent=2, ensure_ascii=False))
+    else:
+        console.print(f"[bold green][OK] Mesaj gönderildi -> {args.to} (#{msg.id})[/bold green]")
+    return 0
+
+
+def cmd_msg_inbox(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    messages_store = MessagesStore(conn)
+
+    recipient = getattr(args, "for_id", None) or os.environ.get("AGENTBUS_JOB_ID") or "orchestrator"
+    msgs = messages_store.get_inbox(recipient_id=recipient, unread_only=getattr(args, "unread", False), limit=getattr(args, "limit", 50))
+
+    if getattr(args, "mark_read", False):
+        for m in msgs:
+            messages_store.mark_read(m.id)
+
+    if is_json_mode(args):
+        data = [
+            {"id": m.id, "ts": m.ts, "from": m.from_id, "to": m.to_id, "body": m.body, "read_at": m.read_at}
+            for m in msgs
+        ]
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        if not msgs:
+            console.print("[dim]Gelen kutusu boş.[/dim]")
+            return 0
+        table = Table(title=f"Gelen Kutusu ({recipient})")
+        table.add_column("ID", style="cyan", width=6)
+        table.add_column("Kimden", style="green", width=16)
+        table.add_column("Tarih", style="magenta", width=20)
+        table.add_column("Mesaj", style="white")
+        for m in msgs:
+            table.add_row(str(m.id), m.from_id, m.ts[:19], m.body)
+        console.print(table)
+    return 0
+
+
+def cmd_board_get(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    board_store = BoardStore(conn)
+    entry = board_store.get_entry(args.key)
+    if not entry:
+        if is_json_mode(args):
+            print(json.dumps({"error": "not_found", "key": args.key}, indent=2))
+        else:
+            err_console.print(f"[yellow]Anahtar bulunamadı: {args.key}[/yellow]")
+        return 1
+    if is_json_mode(args):
+        print(json.dumps({"key": entry.key, "value": entry.value, "author": entry.author, "version": entry.version, "updated_at": entry.updated_at}, indent=2, ensure_ascii=False))
+    else:
+        print(entry.value)
+    return 0
+
+
+def cmd_board_set(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    board_store = BoardStore(conn)
+    events_store = EventsStore(conn)
+
+    author = os.environ.get("AGENTBUS_JOB_ID") or getattr(args, "author", None) or "orchestrator"
+    entry = board_store.set_entry(args.key, args.value, author=author)
+    events_store.emit_event(
+        "board.updated",
+        job_id=author if author != "orchestrator" else None,
+        payload={"key": entry.key, "value": entry.value, "version": entry.version, "author": author}
+    )
+    if is_json_mode(args):
+        print(json.dumps({"status": "ok", "key": entry.key, "value": entry.value, "version": entry.version}, indent=2, ensure_ascii=False))
+    else:
+        console.print(f"[bold green][OK] Tahta güncellendi: {entry.key} (v{entry.version})[/bold green]")
+    return 0
+
+
+def cmd_board_ls(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    board_store = BoardStore(conn)
+    entries = board_store.list_entries()
+    if is_json_mode(args):
+        data = [
+            {"key": e.key, "value": e.value, "author": e.author, "version": e.version, "updated_at": e.updated_at}
+            for e in entries
+        ]
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        if not entries:
+            console.print("[dim]Tahta boş.[/dim]")
+            return 0
+        table = Table(title="Ortak Kara Tahta")
+        table.add_column("Anahtar", style="cyan", width=20)
+        table.add_column("Değer", style="white")
+        table.add_column("Yazar", style="green", width=16)
+        table.add_column("Ver.", style="magenta", width=6)
+        table.add_column("Güncelleme", style="dim", width=20)
+        for e in entries:
+            val_preview = e.value if len(e.value) <= 60 else e.value[:57] + "..."
+            table.add_row(e.key, val_preview, e.author, str(e.version), e.updated_at[:19])
+        console.print(table)
+    return 0
+
+
+def cmd_claim(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    claims_store = ClaimsStore(conn)
+    events_store = EventsStore(conn)
+
+    job_id = os.environ.get("AGENTBUS_JOB_ID") or getattr(args, "job", None) or "orchestrator"
+
+    # Çakışma kontrolü
+    existing_claims = claims_store.list_claims()
+    for c in existing_claims:
+        if c.path_glob == args.glob and c.job_id != job_id:
+            msg = f"Bu dosya yolu zaten başka bir iş tarafından kilitlenmiş: {c.path_glob} ({c.job_id})"
+            if is_json_mode(args):
+                print(json.dumps({"status": "conflict", "error": msg}, indent=2))
+            else:
+                err_console.print(f"[red]{msg}[/red]")
+            return 1
+
+    claim = claims_store.claim_path(args.glob, job_id=job_id)
+    events_store.emit_event(
+        "claim.acquired",
+        job_id=job_id if job_id != "orchestrator" else None,
+        payload={"glob": claim.path_glob, "job_id": job_id}
+    )
+    if is_json_mode(args):
+        print(json.dumps({"status": "ok", "glob": claim.path_glob, "job_id": job_id}, indent=2))
+    else:
+        console.print(f"[bold green][OK] Kilit alındı: {claim.path_glob} ({job_id})[/bold green]")
+    return 0
+
+
+def cmd_unclaim(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    claims_store = ClaimsStore(conn)
+    events_store = EventsStore(conn)
+
+    job_id = os.environ.get("AGENTBUS_JOB_ID") or getattr(args, "job", None) or "orchestrator"
+    ok = claims_store.unclaim_path(args.glob, job_id=job_id)
+    if ok:
+        events_store.emit_event(
+            "claim.released",
+            job_id=job_id if job_id != "orchestrator" else None,
+            payload={"glob": args.glob, "job_id": job_id}
+        )
+        if is_json_mode(args):
+            print(json.dumps({"status": "ok", "glob": args.glob}, indent=2))
+        else:
+            console.print(f"[bold green][OK] Kilit bırakıldı: {args.glob}[/bold green]")
+        return 0
+    else:
+        if is_json_mode(args):
+            print(json.dumps({"status": "not_found", "glob": args.glob}, indent=2))
+        else:
+            err_console.print(f"[yellow]Bırakılacak kilit bulunamadı: {args.glob}[/yellow]")
+        return 1
+
+
+def cmd_open(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    if job.status == JobStatus.RUNNING:
+        transition(conn, job.id, JobStatus.RUNNING, JobStatus.ATTACH_PENDING, reason="İnsan bağlanmak istedi (G3)")
+        console.print("[yellow]İş şu an çalışıyor; çalışan turun bitmesi bekleniyor (G3 kuralı: attach_pending)...[/yellow]")
+        return 0
+
+    if job.status != JobStatus.HUMAN_ATTACHED:
+        transition(conn, job.id, job.status, JobStatus.HUMAN_ATTACHED, reason="İnsan oturumu açtı (open)")
+
+    events_store = EventsStore(conn)
+    events_store.emit_event("job.attached", job_id=job.id, payload={"conversation_id": job.conversation_id})
+
+    work_dir = job.worktree_path or str(home_dir)
+    conv_arg = ["--conversation", job.conversation_id] if job.conversation_id else []
+
+    if getattr(args, "here", False) or not sys.platform.startswith("win"):
+        if is_json_mode(args):
+            print(json.dumps({"status": "human_attached", "job_id": job.id, "cwd": work_dir}, indent=2))
+        else:
+            console.print(f"[bold green][OK] İş {job.id} human_attached yapıldı. agy başlatılıyor...[/bold green]")
+            agy_bin = os.environ.get("AGENTBUS_AGY_BIN", "agy")
+            subprocess.run([agy_bin] + conv_arg, cwd=work_dir)
+    else:
+        agy_bin = os.environ.get("AGENTBUS_AGY_BIN", "agy")
+        cmd_str = f'start "Agent Bus: {job.id}" {agy_bin} ' + " ".join(conv_arg)
+        subprocess.Popen(cmd_str, shell=True, cwd=work_dir)
+        if is_json_mode(args):
+            print(json.dumps({"status": "human_attached", "job_id": job.id, "terminal": "new_window"}, indent=2))
+        else:
+            console.print(f"[bold green][OK] İş {job.id} human_attached yapıldı ve yeni konsol penceresinde açıldı.[/bold green]")
+    return 0
+
+
+def cmd_detach(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    if job.status not in (JobStatus.HUMAN_ATTACHED, JobStatus.ATTACH_PENDING):
+        err_console.print(f"[yellow]İş insan oturumunda değil (durum: {job.status.value}).[/yellow]")
+        return 1
+
+    transition(conn, job.id, job.status, JobStatus.QUEUED, reason="İnsan oturumu devretti (detach)")
+    events_store = EventsStore(conn)
+    events_store.emit_event("job.detached", job_id=job.id)
+
+    if is_json_mode(args):
+        print(json.dumps({"status": "queued", "job_id": job.id}, indent=2))
+    else:
+        console.print(f"[bold green][OK] İş {job.id} devredildi (detach). Supervisor kuyruğunda devam edecek.[/bold green]")
+    return 0
+
+
+def cmd_reply(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    if job.status != JobStatus.NEEDS_INPUT:
+        err_console.print(f"[yellow]İş soru bekler (needs_input) durumda değil (şu anki durum: {job.status.value}).[/yellow]")
+        return 1
+
+    messages_store = MessagesStore(conn)
+    messages_store.send_message(from_id="orchestrator", to_id=job.id, body=args.answer)
+    transition(conn, job.id, JobStatus.NEEDS_INPUT, JobStatus.QUEUED, reason=f"Yanıt verildi: {args.answer[:40]}")
+    events_store = EventsStore(conn)
+    events_store.emit_event("job.replied", job_id=job.id, payload={"answer": args.answer})
+
+    if is_json_mode(args):
+        print(json.dumps({"status": "queued", "job_id": job.id, "answer": args.answer}, indent=2, ensure_ascii=False))
+    else:
+        console.print(f"[bold green][OK] İş {job.id} yanıtlandı ve tekrar kuyruğa alındı.[/bold green]")
+    return 0
+
+
+def cmd_send(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    messages_store = MessagesStore(conn)
+    messages_store.send_message(from_id="orchestrator", to_id=job.id, body=args.instruction)
+    if job.status in (JobStatus.AWAITING_REVIEW, JobStatus.PAUSED, JobStatus.FAILED):
+        transition(conn, job.id, job.status, JobStatus.QUEUED, reason=f"Ek talimat verildi: {args.instruction[:40]}")
+
+    events_store = EventsStore(conn)
+    events_store.emit_event("job.instruction_sent", job_id=job.id, payload={"instruction": args.instruction})
+
+    if is_json_mode(args):
+        print(json.dumps({"status": "ok", "job_id": job.id, "instruction": args.instruction}, indent=2, ensure_ascii=False))
+    else:
+        console.print(f"[bold green][OK] İş {job.id}'e talimat gönderildi.[/bold green]")
+    return 0
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    transition(conn, job.id, job.status, JobStatus.CANCELLED, reason=getattr(args, "reason", None) or "Kullanıcı iptali")
+    if is_json_mode(args):
+        print(json.dumps({"status": "cancelled", "job_id": job.id}, indent=2))
+    else:
+        console.print(f"[bold green][OK] İş {job.id} iptal edildi.[/bold green]")
+    return 0
+
+
+def cmd_pause(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    transition(conn, job.id, job.status, JobStatus.PAUSED, reason="Kullanıcı duraklattı")
+    if is_json_mode(args):
+        print(json.dumps({"status": "paused", "job_id": job.id}, indent=2))
+    else:
+        console.print(f"[bold green][OK] İş {job.id} duraklatıldı.[/bold green]")
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    transition(conn, job.id, job.status, JobStatus.QUEUED, reason="Kullanıcı devam ettirdi")
+    if is_json_mode(args):
+        print(json.dumps({"status": "queued", "job_id": job.id}, indent=2))
+    else:
+        console.print(f"[bold green][OK] İş {job.id} kuyruğa alındı (devam ediyor).[/bold green]")
+    return 0
+
+
+def cmd_retry(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    if job.status != JobStatus.FAILED:
+        err_console.print(f"[yellow]Yalnızca failed durumundaki işler yeniden denenebilir (şu anki durum: {job.status.value}).[/yellow]")
+        return 1
+
+    new_max = job.attempt + 3
+    jobs_store.update_job(job.id, max_attempts=new_max)
+    transition(conn, job.id, JobStatus.FAILED, JobStatus.QUEUED, reason=f"Yeniden denendi (yeni sınır: {new_max})")
+
+    if is_json_mode(args):
+        print(json.dumps({"status": "queued", "job_id": job.id, "max_attempts": new_max}, indent=2))
+    else:
+        console.print(f"[bold green][OK] İş {job.id} tekrar kuyruğa alındı (max_attempts: {new_max}).[/bold green]")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--home", type=str, default=argparse.SUPPRESS, help="Özel Agent Bus veri dizini (.data)")
@@ -684,12 +1087,109 @@ def build_parser() -> argparse.ArgumentParser:
     p_gc.add_argument("--repo", type=str, default=None, help="Hedef repo dizini")
     p_gc.set_defaults(func=cmd_gc)
 
+    # msg
+    p_msg = subparsers.add_parser("msg", parents=[common], help="Ajanlar ve orkestratör arası mesajlaşma")
+    p_msg_subs = p_msg.add_subparsers(dest="msg_command", required=True)
+
+    # msg send
+    p_msg_send = p_msg_subs.add_parser("send", parents=[common], help="Mesaj gönder")
+    p_msg_send.add_argument("--to", required=True, help="Alıcı iş kimliği veya 'orchestrator' veya 'all'")
+    p_msg_send.add_argument("--sender", help="Gönderen kimliği (varsayılan: AGENTBUS_JOB_ID veya orchestrator)")
+    p_msg_send.add_argument("body", help="Mesaj metni")
+    p_msg_send.set_defaults(func=cmd_msg_send)
+
+    # msg inbox
+    p_msg_inbox = p_msg_subs.add_parser("inbox", parents=[common], help="Gelen kutusunu oku")
+    p_msg_inbox.add_argument("--for", dest="for_id", help="Hangi alıcı için listelensin")
+    p_msg_inbox.add_argument("--unread", action="store_true", help="Yalnızca okunmamış mesajları listele")
+    p_msg_inbox.add_argument("--mark-read", action="store_true", help="Mesajları okundu olarak işaretle")
+    p_msg_inbox.add_argument("--limit", type=int, default=50, help="En çok kaç mesaj listelensin")
+    p_msg_inbox.set_defaults(func=cmd_msg_inbox)
+
+    # board
+    p_board = subparsers.add_parser("board", parents=[common], help="Ortak kara tahta")
+    p_board_subs = p_board.add_subparsers(dest="board_command", required=True)
+
+    # board get
+    p_board_get = p_board_subs.add_parser("get", parents=[common], help="Tahtadan değer oku")
+    p_board_get.add_argument("key", help="Anahtar adı")
+    p_board_get.set_defaults(func=cmd_board_get)
+
+    # board set
+    p_board_set = p_board_subs.add_parser("set", parents=[common], help="Tahtaya değer yaz")
+    p_board_set.add_argument("key", help="Anahtar adı")
+    p_board_set.add_argument("value", help="Değer")
+    p_board_set.add_argument("--author", help="Yazar kimliği")
+    p_board_set.set_defaults(func=cmd_board_set)
+
+    # board ls
+    p_board_ls = p_board_subs.add_parser("ls", parents=[common], help="Tahtadaki tüm girdileri listele")
+    p_board_ls.set_defaults(func=cmd_board_ls)
+
+    # claim
+    p_claim = subparsers.add_parser("claim", parents=[common], help="Dosya yolu veya glob için kilit al")
+    p_claim.add_argument("glob", help="Dosya yolu glob kalıbı (örn: src/api/**)")
+    p_claim.add_argument("--job", help="İş kimliği (varsayılan: AGENTBUS_JOB_ID)")
+    p_claim.set_defaults(func=cmd_claim)
+
+    # unclaim
+    p_unclaim = subparsers.add_parser("unclaim", parents=[common], help="Dosya kilidini bırak")
+    p_unclaim.add_argument("glob", help="Bırakılacak glob kalıbı")
+    p_unclaim.add_argument("--job", help="İş kimliği")
+    p_unclaim.set_defaults(func=cmd_unclaim)
+
+    # open
+    p_open = subparsers.add_parser("open", parents=[common], help="İş oturumunu interaktif açar (human_attached)")
+    p_open.add_argument("job_id", help="İş kimliği")
+    p_open.add_argument("--here", action="store_true", help="Mevcut terminalde aç")
+    p_open.set_defaults(func=cmd_open)
+
+    # detach
+    p_detach = subparsers.add_parser("detach", parents=[common], help="İşi supervisor'a devredip kuyruğa bırakır")
+    p_detach.add_argument("job_id", help="İş kimliği")
+    p_detach.set_defaults(func=cmd_detach)
+
+    # reply
+    p_reply = subparsers.add_parser("reply", parents=[common], help="needs_input sorusuna yanıt ver")
+    p_reply.add_argument("job_id", help="İş kimliği")
+    p_reply.add_argument("answer", help="Yanıt metni")
+    p_reply.set_defaults(func=cmd_reply)
+
+    # send
+    p_send = subparsers.add_parser("send", parents=[common], help="İşe ek talimat gönder")
+    p_send.add_argument("job_id", help="İş kimliği")
+    p_send.add_argument("instruction", help="Talimat metni")
+    p_send.set_defaults(func=cmd_send)
+
+    # cancel
+    p_cancel = subparsers.add_parser("cancel", parents=[common], help="İşi iptal et")
+    p_cancel.add_argument("job_id", help="İş kimliği")
+    p_cancel.add_argument("--reason", default="Kullanıcı iptali", help="İptal gerekçesi")
+    p_cancel.set_defaults(func=cmd_cancel)
+
+    # pause
+    p_pause = subparsers.add_parser("pause", parents=[common], help="İşi duraklat")
+    p_pause.add_argument("job_id", help="İş kimliği")
+    p_pause.set_defaults(func=cmd_pause)
+
+    # resume
+    p_resume = subparsers.add_parser("resume", parents=[common], help="Duraklatılan işi devam ettir")
+    p_resume.add_argument("job_id", help="İş kimliği")
+    p_resume.set_defaults(func=cmd_resume)
+
+    # retry
+    p_retry = subparsers.add_parser("retry", parents=[common], help="Başarısız işi yeniden dene")
+    p_retry.add_argument("job_id", help="İş kimliği")
+    p_retry.set_defaults(func=cmd_retry)
+
     return parser
 
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    if not check_agent_role_guard(args.command, args):
+        sys.exit(13)
     if hasattr(args, "func"):
         sys.exit(args.func(args))
     else:

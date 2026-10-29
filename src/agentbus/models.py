@@ -65,6 +65,7 @@ ALLOWED_TRANSITIONS: Dict[JobStatus, List[JobStatus]] = {
         JobStatus.RUNNING,
         JobStatus.PAUSED,
         JobStatus.CANCELLED,
+        JobStatus.HUMAN_ATTACHED,
     ],
     JobStatus.BLOCKED: [
         JobStatus.QUEUED,
@@ -93,6 +94,7 @@ ALLOWED_TRANSITIONS: Dict[JobStatus, List[JobStatus]] = {
     ],
     JobStatus.NEEDS_INPUT: [
         JobStatus.QUEUED,
+        JobStatus.HUMAN_ATTACHED,
         JobStatus.CANCELLED,
     ],
     JobStatus.AWAITING_REVIEW: [
@@ -101,6 +103,7 @@ ALLOWED_TRANSITIONS: Dict[JobStatus, List[JobStatus]] = {
         JobStatus.TESTS_FAILED,
         JobStatus.REJECTED,
         JobStatus.QUEUED,  # Düzeltme turu talimatı verilince
+        JobStatus.HUMAN_ATTACHED,
         JobStatus.CANCELLED,
     ],
     JobStatus.INTEGRATED: [
@@ -127,6 +130,8 @@ ALLOWED_TRANSITIONS: Dict[JobStatus, List[JobStatus]] = {
     ],
     JobStatus.FAILED: [
         JobStatus.QUEUED,  # Retry yapıldığında
+        JobStatus.HUMAN_ATTACHED,
+        JobStatus.CANCELLED,
     ],
     JobStatus.REJECTED: [
         JobStatus.QUEUED,  # Tekrar kuyruğa alındığında
