@@ -1134,6 +1134,158 @@ def cmd_tui(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan_apply(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    events_store = EventsStore(conn)
+    meta_store = MetaStore(conn)
+
+    plan_path = Path(args.file)
+    if not plan_path.exists():
+        err_console.print(f"[red]Plan dosyası bulunamadı: {args.file}[/red]")
+        return 1
+
+    content = plan_path.read_text(encoding="utf-8")
+    import yaml
+    import hashlib
+    data = yaml.safe_load(content)
+    if not data or "jobs" not in data:
+        err_console.print("[red]Plan dosyası geçersiz: 'jobs' listesi bulunamadı.[/red]")
+        return 1
+
+    goal = data.get("goal", plan_path.stem)
+    default_repo = getattr(args, "repo", None) or data.get("repo") or meta_store.get("default_repo")
+    plan_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
+
+    key_to_job_id: Dict[str, str] = {}
+    for item in data["jobs"]:
+        item_key = item["key"]
+        idemp_key = f"{plan_hash}:{item_key}"
+        existing = jobs_store.find_by_idempotency_key(idemp_key)
+        if existing:
+            key_to_job_id[item_key] = existing.id
+
+    created_jobs: List[Job] = []
+    with conn:
+        for item in data["jobs"]:
+            item_key = item["key"]
+            idemp_key = f"{plan_hash}:{item_key}"
+            if item_key in key_to_job_id:
+                job = jobs_store.get_job(key_to_job_id[item_key])
+                created_jobs.append(job)
+                continue
+
+            after_keys = item.get("after", [])
+            depends_on_ids = [key_to_job_id[ak] for ak in after_keys if ak in key_to_job_id]
+
+            job = jobs_store.create_job(
+                title=item.get("title", item_key),
+                task_md=item.get("task", ""),
+                depends_on=depends_on_ids,
+                priority=item.get("priority", 5),
+                agent_profile=item.get("profile", "default"),
+                allowed_paths=item.get("paths", []),
+                idempotency_key=idemp_key,
+                repo=default_repo,
+            )
+            key_to_job_id[item_key] = job.id
+            created_jobs.append(job)
+
+    events_store.emit_event(
+        "plan.applied",
+        payload={
+            "goal": goal,
+            "plan_hash": plan_hash,
+            "job_ids": [j.id for j in created_jobs]
+        }
+    )
+
+    if is_json_mode(args):
+        print(json.dumps({
+            "status": "applied",
+            "goal": goal,
+            "plan_hash": plan_hash,
+            "jobs": [
+                {"id": j.id, "title": j.title, "status": j.status.value, "depends_on": j.depends_on}
+                for j in created_jobs
+            ]
+        }, indent=2, ensure_ascii=False))
+    else:
+        console.print(f"[bold green][OK] Plan başarıyla uygulandı:[/bold green] [cyan]{goal}[/cyan] ({plan_hash})")
+        for j in created_jobs:
+            dep_s = f" (bağımlılık: {j.depends_on})" if j.depends_on else ""
+            console.print(f"  • [cyan]{j.id}[/cyan]: {j.title} [{j.status.value}]{dep_s}")
+    return 0
+
+
+def cmd_wait(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+
+    job_ids = getattr(args, "job_ids", []) or []
+    target_statuses = {
+        JobStatus.AWAITING_REVIEW,
+        JobStatus.INTEGRATED,
+        JobStatus.PROMOTED,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+        JobStatus.CONFLICT,
+        JobStatus.TESTS_FAILED,
+        JobStatus.NEEDS_INPUT,
+    }
+
+    import time
+    start_time = time.time()
+    timeout = getattr(args, "timeout", None) or 300.0
+
+    while True:
+        if job_ids:
+            current_jobs = [jobs_store.get_job(jid) for jid in job_ids]
+            current_jobs = [j for j in current_jobs if j]
+        else:
+            current_jobs = jobs_store.list_jobs(limit=100)
+            if not getattr(args, "any", False):
+                active_jobs = [j for j in current_jobs if j.status in (JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.BLOCKED)]
+                if not active_jobs:
+                    break
+
+        if getattr(args, "any", False):
+            finished = [j for j in current_jobs if j.status in target_statuses]
+            if finished:
+                if is_json_mode(args):
+                    print(json.dumps([{"id": j.id, "status": j.status.value, "title": j.title} for j in finished], indent=2))
+                else:
+                    console.print(f"[bold green][OK] En az bir iş tamamlandı:[/bold green] {finished[0].id} ({finished[0].status.value})")
+                return 0
+        else:
+            if job_ids:
+                all_done = all(j.status in target_statuses for j in current_jobs)
+                if all_done and len(current_jobs) == len(job_ids):
+                    if is_json_mode(args):
+                        print(json.dumps([{"id": j.id, "status": j.status.value, "title": j.title} for j in current_jobs], indent=2))
+                    else:
+                        console.print(f"[bold green][OK] Belirtilen tüm işler tamamlandı.[/bold green]")
+                    return 0
+            else:
+                active_jobs = [j for j in current_jobs if j.status in (JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.BLOCKED)]
+                if not active_jobs:
+                    if is_json_mode(args):
+                        print(json.dumps([{"id": j.id, "status": j.status.value} for j in current_jobs], indent=2))
+                    else:
+                        console.print("[bold green][OK] Tüm işler tamamlandı.[/bold green]")
+                    return 0
+
+        if time.time() - start_time > timeout:
+            err_console.print("[yellow]Zaman aşımı (timeout): Beklenen işler henüz tamamlanmadı.[/yellow]")
+            return 1
+
+        time.sleep(0.5)
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--home", type=str, default=argparse.SUPPRESS, help="Özel Agent Bus veri dizini (.data)")
@@ -1341,6 +1493,21 @@ def build_parser() -> argparse.ArgumentParser:
     # tui
     p_tui = subparsers.add_parser("tui", parents=[common], help="Tam Textual gömülü ConPTY arayüzünü başlatır")
     p_tui.set_defaults(func=cmd_tui)
+
+    # plan
+    p_plan = subparsers.add_parser("plan", parents=[common], help="Çoklu iş planı yönetimi")
+    p_plan_subs = p_plan.add_subparsers(dest="plan_command", required=True)
+    p_plan_apply = p_plan_subs.add_parser("apply", parents=[common], help="YAML plan dosyasını tek işlemde kuyruğa al")
+    p_plan_apply.add_argument("file", help="Plan dosyası yolu (plan.yaml)")
+    p_plan_apply.add_argument("--repo", help="Hedef git deposu yolu")
+    p_plan_apply.set_defaults(func=cmd_plan_apply)
+
+    # wait
+    p_wait = subparsers.add_parser("wait", parents=[common], help="İşlerin tamamlanmasını bekler")
+    p_wait.add_argument("job_ids", nargs="*", help="Beklenecek iş kimlikleri")
+    p_wait.add_argument("--any", action="store_true", help="Herhangi bir iş bittiğinde dön")
+    p_wait.add_argument("--timeout", type=float, default=300.0, help="Zaman aşımı (saniye)")
+    p_wait.set_defaults(func=cmd_wait)
 
     return parser
 

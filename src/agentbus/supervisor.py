@@ -351,6 +351,29 @@ class Supervisor:
                 meta_store.delete("supervisor_lease")
             start_conn.close()
 
+    def run_once(self) -> None:
+        """Tek bir zamanlama turu çalıştırır."""
+        self._running = True
+        conn = get_connection(self.db_path)
+        jobs_store = JobsStore(conn)
+        meta_store = MetaStore(conn)
+
+        is_paused = meta_store.get("paused") == "1"
+        with self._lock:
+            active_count = len(self._active_workers)
+
+        if not is_paused and active_count < self.max_parallel:
+            job = jobs_store.acquire_next_queued_job(
+                lease_owner=self.supervisor_id,
+                lease_duration_s=self.lease_duration_s
+            )
+            if job:
+                with self._lock:
+                    t = threading.Thread(target=self._worker_thread, args=(job.id,), daemon=True)
+                    self._active_workers[job.id] = t
+                    t.start()
+        conn.close()
+
     def stop(self, wait_workers: bool = True, timeout: float = 30.0) -> None:
         """Supervisor'ı nazikçe durdurur."""
         self._running = False
