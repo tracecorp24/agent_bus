@@ -57,6 +57,7 @@ class EventsStore:
         job_id: Optional[str] = None,
         event_type: Optional[str] = None,
         min_id: Optional[int] = None,
+        since_id: Optional[int] = None,
         limit: int = 100,
         ascending: bool = True,
     ) -> List[Event]:
@@ -69,9 +70,10 @@ class EventsStore:
         if event_type:
             query += " AND type = ?"
             params.append(event_type)
-        if min_id is not None:
+        effective_min = min_id if min_id is not None else since_id
+        if effective_min is not None:
             query += " AND id > ?"
-            params.append(min_id)
+            params.append(effective_min)
 
         direction = "ASC" if ascending else "DESC"
         query += f" ORDER BY id {direction} LIMIT ?"

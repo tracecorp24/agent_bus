@@ -198,6 +198,17 @@ class Event:
     level: str = "info"
     payload_json: str = "{}"
 
+    @property
+    def event(self) -> str:
+        return self.type
+
+    @property
+    def payload(self) -> Dict[str, Any]:
+        try:
+            return json.loads(self.payload_json) if self.payload_json else {}
+        except Exception:
+            return {}
+
 
 @dataclass
 class Message:

@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.table import Table
 
 from agentbus.db import get_connection, init_db, get_home_dir, get_db_path, transition
-from agentbus.models import JobStatus, Job, Turn, Event
+from agentbus.models import JobStatus, Job, Turn, Event, utc_now_iso
 from agentbus.store.jobs import JobsStore
 from agentbus.store.turns import TurnsStore
 from agentbus.store.events import EventsStore
@@ -991,6 +991,149 @@ def cmd_retry(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tail(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    events_store = EventsStore(conn)
+
+    job_id = getattr(args, "job", None)
+    event_type = getattr(args, "type", None)
+    limit = getattr(args, "limit", 20)
+    follow = getattr(args, "follow", False)
+
+    events = events_store.list_events(job_id=job_id, event_type=event_type, limit=limit)
+    events.reverse()
+    last_id = 0
+    for e in events:
+        last_id = max(last_id, e.id)
+        if is_json_mode(args):
+            print(json.dumps({"id": e.id, "ts": e.ts, "event": e.event, "job_id": e.job_id, "payload": e.payload}, ensure_ascii=False))
+        else:
+            j_str = f"[{e.job_id}]" if e.job_id else "[-]"
+            console.print(f"[dim]{e.ts[:19]}[/dim] [cyan]{j_str:<18}[/cyan] [bold magenta]{e.event:<18}[/bold magenta] {json.dumps(e.payload or {}, ensure_ascii=False)}")
+
+    if not follow:
+        return 0
+
+    try:
+        import time
+        while True:
+            time.sleep(0.5)
+            new_events = events_store.list_events(since_id=last_id, job_id=job_id, event_type=event_type, limit=50)
+            new_events.reverse()
+            for e in new_events:
+                last_id = max(last_id, e.id)
+                if is_json_mode(args):
+                    print(json.dumps({"id": e.id, "ts": e.ts, "event": e.event, "job_id": e.job_id, "payload": e.payload}, ensure_ascii=False))
+                else:
+                    j_str = f"[{e.job_id}]" if e.job_id else "[-]"
+                    console.print(f"[dim]{e.ts[:19]}[/dim] [cyan]{j_str:<18}[/cyan] [bold magenta]{e.event:<18}[/bold magenta] {json.dumps(e.payload or {}, ensure_ascii=False)}")
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    events_store = EventsStore(conn)
+    meta_store = MetaStore(conn)
+
+    from rich.live import Live
+    from rich.layout import Layout
+    from rich.panel import Panel
+    import time
+
+    def make_watch_layout() -> Layout:
+        layout = Layout()
+        layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="jobs", ratio=2),
+            Layout(name="events", ratio=1)
+        )
+
+        sup_lease = meta_store.get("supervisor_lease")
+        sup_status = f"[green]AKTİF ({sup_lease[:8]})[/green]" if sup_lease else "[yellow]DURDU[/yellow]"
+
+        all_jobs = jobs_store.list_jobs(limit=100)
+        running = [j for j in all_jobs if j.status == JobStatus.RUNNING]
+        queued = [j for j in all_jobs if j.status == JobStatus.QUEUED]
+        review = [j for j in all_jobs if j.status == JobStatus.AWAITING_REVIEW]
+
+        header_table = Table.grid(expand=True)
+        header_table.add_column(justify="left")
+        header_table.add_column(justify="right")
+        header_table.add_row(
+            f" [bold cyan]AGENT BUS CANLI İZLEME[/bold cyan] │ Supervisor: {sup_status} │ Çalışan: [bold green]{len(running)}/4[/bold green] │ Kuyruk: [bold yellow]{len(queued)}[/bold yellow] │ İnceleme: [bold magenta]{len(review)}[/bold magenta]",
+            f"[dim]{utc_now_iso()}[/dim] "
+        )
+        layout["header"].update(Panel(header_table, style="blue"))
+
+        # İşler Tablosu
+        t_jobs = Table(expand=True, box=None)
+        t_jobs.add_column("İş ID", style="cyan", width=16)
+        t_jobs.add_column("Başlık", style="white")
+        t_jobs.add_column("Durum", style="bold", width=16)
+        t_jobs.add_column("Öncelik", justify="center", width=8)
+        t_jobs.add_column("Deneme", justify="center", width=8)
+        t_jobs.add_column("Worktree", style="dim", width=22)
+
+        for j in all_jobs[:15]:
+            st_color = "green" if j.status == JobStatus.RUNNING else "yellow" if j.status == JobStatus.QUEUED else "magenta" if j.status == JobStatus.AWAITING_REVIEW else "white"
+            wt_name = Path(j.worktree_path).name if j.worktree_path else "-"
+            t_jobs.add_row(
+                j.id,
+                j.title[:35],
+                f"[{st_color}]{j.status.value}[/{st_color}]",
+                str(j.priority),
+                f"{j.attempt}/{j.max_attempts}",
+                wt_name
+            )
+        layout["jobs"].update(Panel(t_jobs, title="İş Durumları", border_style="cyan"))
+
+        # Olaylar Tablosu
+        latest_events = events_store.list_events(limit=8)
+        latest_events.reverse()
+        t_ev = Table(expand=True, box=None)
+        t_ev.add_column("Zaman", style="dim", width=12)
+        t_ev.add_column("İş", style="cyan", width=16)
+        t_ev.add_column("Olay", style="bold magenta", width=18)
+        t_ev.add_column("Detay", style="white")
+        for e in latest_events:
+            j_str = e.job_id or "-"
+            payload_str = json.dumps(e.payload or {}, ensure_ascii=False)
+            if len(payload_str) > 55:
+                payload_str = payload_str[:52] + "..."
+            t_ev.add_row(e.ts[11:19], j_str, e.event, payload_str)
+        layout["events"].update(Panel(t_ev, title="Son Olaylar (events)", border_style="magenta"))
+
+        return layout
+
+    if getattr(args, "once", False) or is_json_mode(args):
+        console.print(make_watch_layout())
+        return 0
+
+    try:
+        with Live(make_watch_layout(), refresh_per_second=2, console=console) as live:
+            while True:
+                time.sleep(0.5)
+                live.update(make_watch_layout())
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def cmd_tui(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    from agentbus.tui.app import AgentBusTuiApp
+    app = AgentBusTuiApp(home_dir)
+    app.run()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--home", type=str, default=argparse.SUPPRESS, help="Özel Agent Bus veri dizini (.data)")
@@ -1181,6 +1324,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_retry = subparsers.add_parser("retry", parents=[common], help="Başarısız işi yeniden dene")
     p_retry.add_argument("job_id", help="İş kimliği")
     p_retry.set_defaults(func=cmd_retry)
+
+    # tail
+    p_tail = subparsers.add_parser("tail", parents=[common], help="Olay akışını görüntüler")
+    p_tail.add_argument("--job", help="İş kimliğine göre filtrele")
+    p_tail.add_argument("--type", help="Olay türüne göre filtrele")
+    p_tail.add_argument("--limit", type=int, default=20, help="Listelenecek olay sayısı")
+    p_tail.add_argument("-f", "--follow", action="store_true", help="Canlı akışı izle")
+    p_tail.set_defaults(func=cmd_tail)
+
+    # watch
+    p_watch = subparsers.add_parser("watch", parents=[common], help="Canlı pano (Rich): işler, yuvalar, son olaylar")
+    p_watch.add_argument("--once", action="store_true", help="Tek seferlik tablo basıp çık")
+    p_watch.set_defaults(func=cmd_watch)
+
+    # tui
+    p_tui = subparsers.add_parser("tui", parents=[common], help="Tam Textual gömülü ConPTY arayüzünü başlatır")
+    p_tui.set_defaults(func=cmd_tui)
 
     return parser
 
