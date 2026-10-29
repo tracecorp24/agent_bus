@@ -12,7 +12,7 @@ from typing import Optional, List
 from rich.console import Console
 from rich.table import Table
 
-from agentbus.db import get_connection, init_db, get_home_dir, get_db_path
+from agentbus.db import get_connection, init_db, get_home_dir, get_db_path, transition
 from agentbus.models import JobStatus, Job, Turn, Event
 from agentbus.store.jobs import JobsStore
 from agentbus.store.turns import TurnsStore
@@ -434,10 +434,164 @@ def cmd_recover(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_diff(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+    if not job.worktree_path or not Path(job.worktree_path).exists():
+        err_console.print(f"[yellow]İş için worktree bulunamadı veya henüz oluşturulmadı.[/yellow]")
+        return 0
+
+    from agentbus.worktree import get_diff
+    diff_text = get_diff(Path(job.worktree_path), job.base_commit)
+    if is_json_mode(args):
+        print(json.dumps({"job_id": job.id, "diff": diff_text}, indent=2, ensure_ascii=False))
+    else:
+        if not diff_text:
+            console.print("[dim]Herhangi bir değişiklik yok.[/dim]")
+        else:
+            print(diff_text)
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    if args.approve:
+        if job.status != JobStatus.AWAITING_REVIEW:
+            err_console.print(f"[red]İş awaiting_review durumunda değil (şu anki durum: {job.status.value}).[/red]")
+            return 1
+        from agentbus.worktree import integrate_job
+        success, msg = integrate_job(conn, home_dir, job)
+        if success:
+            if is_json_mode(args):
+                print(json.dumps({"status": "approved_and_integrated", "job_id": job.id, "message": msg}, indent=2))
+            else:
+                console.print(f"[bold green][OK] İş onaylandı ve entegre edildi: {msg}[/bold green]")
+            return 0
+        else:
+            err_console.print(f"[red]Entegrasyon başarısız: {msg}[/red]")
+            return 1
+    elif args.reject:
+        transition(conn, job.id, job.status, JobStatus.REJECTED, reason=args.reject)
+        if is_json_mode(args):
+            print(json.dumps({"status": "rejected", "job_id": job.id, "reason": args.reject}, indent=2))
+        else:
+            console.print(f"[yellow][OK] İş reddedildi: {args.reject}[/yellow]")
+        return 0
+    else:
+        err_console.print("[yellow]--approve veya --reject <neden> belirtilmelidir.[/yellow]")
+        return 1
+
+
+def cmd_merge(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    from agentbus.worktree import integrate_job
+    success, msg = integrate_job(conn, home_dir, job)
+    if success:
+        if is_json_mode(args):
+            print(json.dumps({"status": "integrated", "job_id": job.id, "message": msg}, indent=2))
+        else:
+            console.print(f"[bold green][OK] {msg}[/bold green]")
+        return 0
+    else:
+        err_console.print(f"[red]Merge başarısız: {msg}[/red]")
+        return 1
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    meta = MetaStore(conn)
+
+    repo_str = args.repo or meta.get("default_repo")
+    if not repo_str:
+        err_console.print("[red]Hedef repo belirtilmedi (--repo veya 'agentbus init --repo').[/red]")
+        return 1
+
+    from agentbus.worktree import promote_repo
+    success, msg = promote_repo(conn, home_dir, Path(repo_str))
+    if success:
+        if is_json_mode(args):
+            print(json.dumps({"status": "promoted", "repo": repo_str, "message": msg}, indent=2))
+        else:
+            console.print(f"[bold green][OK] {msg}[/bold green]")
+        return 0
+    else:
+        if is_json_mode(args):
+            print(json.dumps({"status": "failed", "repo": repo_str, "error": msg}, indent=2))
+        else:
+            err_console.print(f"[yellow][UYARI] {msg}[/yellow]")
+        return 1
+
+
+def cmd_revert(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    jobs_store = JobsStore(conn)
+    job = jobs_store.get_job(args.job_id)
+    if not job:
+        err_console.print(f"[red]İş bulunamadı: {args.job_id}[/red]")
+        return 1
+
+    from agentbus.worktree import revert_job
+    success, msg = revert_job(conn, home_dir, job)
+    if success:
+        if is_json_mode(args):
+            print(json.dumps({"status": "reverted", "job_id": job.id, "message": msg}, indent=2))
+        else:
+            console.print(f"[bold green][OK] {msg}[/bold green]")
+        return 0
+    else:
+        err_console.print(f"[red]Revert başarısız: {msg}[/red]")
+        return 1
+
+
+def cmd_gc(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    meta = MetaStore(conn)
+    repo_str = args.repo or meta.get("default_repo")
+    if not repo_str:
+        err_console.print("[red]Hedef repo belirtilmedi.[/red]")
+        return 1
+
+    from agentbus.worktree import gc_worktrees
+    cleaned = gc_worktrees(conn, home_dir, Path(repo_str))
+    if is_json_mode(args):
+        print(json.dumps({"status": "ok", "cleaned_count": cleaned}, indent=2))
+    else:
+        console.print(f"[bold green][OK] {cleaned} adet worktree temizlendi.[/bold green]")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--home", type=str, default=None, help="Özel Agent Bus veri dizini (.data)")
-    common.add_argument("--json", action="store_true", help="Makine-okunur JSON çıktısı üret")
+    common.add_argument("--home", type=str, default=argparse.SUPPRESS, help="Özel Agent Bus veri dizini (.data)")
+    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Makine-okunur JSON çıktısı üret")
 
     parser = argparse.ArgumentParser(
         prog="agentbus",
@@ -496,6 +650,39 @@ def build_parser() -> argparse.ArgumentParser:
     # recover
     p_rec = subparsers.add_parser("recover", parents=[common], help="Kira süresi geçmiş işleri kurtarır")
     p_rec.set_defaults(func=cmd_recover)
+
+    # diff
+    p_diff = subparsers.add_parser("diff", parents=[common], help="İş worktree diff'ini görüntüler")
+    p_diff.add_argument("job_id", help="İş kimliği")
+    p_diff.set_defaults(func=cmd_diff)
+
+    # review
+    p_rev = subparsers.add_parser("review", parents=[common], help="İnceleme bekleyen işi onaylar veya reddeder")
+    p_rev.add_argument("job_id", help="İş kimliği")
+    p_rev_grp = p_rev.add_mutually_exclusive_group(required=True)
+    p_rev_grp.add_argument("--approve", action="store_true", help="İşi onayla ve entegre et")
+    p_rev_grp.add_argument("--reject", type=str, metavar="NEDEN", help="İşi reddet")
+    p_rev.set_defaults(func=cmd_review)
+
+    # merge
+    p_merge = subparsers.add_parser("merge", parents=[common], help="İşi entegrasyon dalına birleştirir (§15 Aşama 1)")
+    p_merge.add_argument("job_id", help="İş kimliği")
+    p_merge.set_defaults(func=cmd_merge)
+
+    # promote
+    p_prom = subparsers.add_parser("promote", parents=[common], help="Entegrasyon dalını main dalına terfi eder (§15 Aşama 2)")
+    p_prom.add_argument("repo", nargs="?", default=None, help="Hedef repo dizini")
+    p_prom.set_defaults(func=cmd_promote)
+
+    # revert
+    p_revert = subparsers.add_parser("revert", parents=[common], help="İşin entegrasyon merge commit'ini geri alır")
+    p_revert.add_argument("job_id", help="İş kimliği")
+    p_revert.set_defaults(func=cmd_revert)
+
+    # gc
+    p_gc = subparsers.add_parser("gc", parents=[common], help="Kullanılmayan/tamamlanan worktree'leri temizler")
+    p_gc.add_argument("--repo", type=str, default=None, help="Hedef repo dizini")
+    p_gc.set_defaults(func=cmd_gc)
 
     return parser
 

@@ -97,6 +97,8 @@ ALLOWED_TRANSITIONS: Dict[JobStatus, List[JobStatus]] = {
     ],
     JobStatus.AWAITING_REVIEW: [
         JobStatus.INTEGRATED,
+        JobStatus.CONFLICT,
+        JobStatus.TESTS_FAILED,
         JobStatus.REJECTED,
         JobStatus.QUEUED,  # Düzeltme turu talimatı verilince
         JobStatus.CANCELLED,

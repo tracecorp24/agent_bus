@@ -163,6 +163,21 @@ class Supervisor:
             if not job:
                 return
 
+            # Worktree hazırlığı (§5.2)
+            if job.repo and not job.worktree_path:
+                from agentbus.worktree import create_worktree
+                repo_p = Path(job.repo).resolve()
+                if repo_p.exists():
+                    wt_dir = self.home_dir / "worktrees"
+                    wt_path, branch, base_c = create_worktree(repo_p, job.id, wt_dir, job.base_commit)
+                    jobs_store.update_job(
+                        job.id,
+                        worktree_path=str(wt_path),
+                        branch=branch,
+                        base_commit=base_c
+                    )
+                    job = jobs_store.get_job(job_id)
+
             # Tur türünü belirle: ilk tur mu, resume mi, followup mı?
             latest_turn = turns_store.get_latest_turn(job_id)
             if not latest_turn:
