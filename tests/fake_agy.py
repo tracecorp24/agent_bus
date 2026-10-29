@@ -55,25 +55,27 @@ def main():
 
     conv_id = args.conversation or str(uuid.uuid4())
 
-    # Asılma senaryosu
+    # İlk satır: init
+    init_evt = {
+        "event": "init",
+        "conversation_id": conv_id,
+        "init": {
+            "model": args.model,
+            "cwd": os.getcwd(),
+            "tools": ["run_command", "read_file", "write_to_file", "finish"],
+            "permission_mode": "always-proceed"
+        }
+    }
+    sys.stdout.write(json.dumps(init_evt) + "\n")
+    sys.stdout.flush()
+
+    # Asılma senaryosu (init üretildikten sonra süreç takılır)
     if hang:
         time.sleep(3600)
         return 0
 
     # 429 Senaryosu
     if quota_429:
-        init_evt = {
-            "event": "init",
-            "conversation_id": conv_id,
-            "init": {
-                "model": args.model,
-                "cwd": os.getcwd(),
-                "tools": ["run_command"],
-                "permission_mode": "always-proceed"
-            }
-        }
-        sys.stdout.write(json.dumps(init_evt) + "\n")
-        sys.stdout.flush()
         err_res = {
             "event": "result",
             "result": {
@@ -88,20 +90,6 @@ def main():
         sys.stderr.write("error: 429 Quota exceeded for model\n")
         sys.stderr.flush()
         return 1
-
-    # İlk satır: init
-    init_evt = {
-        "event": "init",
-        "conversation_id": conv_id,
-        "init": {
-            "model": args.model,
-            "cwd": os.getcwd(),
-            "tools": ["run_command", "read_file", "write_to_file", "finish"],
-            "permission_mode": "always-proceed"
-        }
-    }
-    sys.stdout.write(json.dumps(init_evt) + "\n")
-    sys.stdout.flush()
 
     # Çökme senaryosu (init'ten sonra süreç aniden ölür)
     if crash:

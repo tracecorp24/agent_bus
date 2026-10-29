@@ -1,11 +1,11 @@
 # İlerleme
-Son güncelleme: 2026-10-29T12:13:00Z
-Şu anki faz: F2 — Runner + Supervisor (işçi döngüsü, kira, kurtarma, K1-K3)
+Son güncelleme: 2026-10-29T13:27:00Z
+Şu anki faz: F3 — Worktree + İnceleme (git worktree, diff, iki aşamalı birleştirme, K-G6)
 
 ## Fazlar
 - [x] F0 — Keşif (agy protokolü, stream-json, stdin/schema/timeout testleri, fake_agy) (commit f577631)
-- [x] F1 — Çekirdek (db, şema, durum makinesi, store'lar, CLI temeli) (commit tamamlanıyor)
-- [ ] F2 — Runner + Supervisor (işçi döngüsü, kira, kurtarma, K1-K3)
+- [x] F1 — Çekirdek (db, şema, durum makinesi, store'lar, CLI temeli) (commit 59df4dd)
+- [x] F2 — Runner + Supervisor (işçi döngüsü, kira, kurtarma, K1-K3) (commit tamamlanıyor)
 - [ ] F3 — Worktree + İnceleme (git worktree, diff, iki aşamalı birleştirme, K-G6)
 - [ ] F4 — İletişim + Açma (messages, board, claims, open/detach, agent kısıtları)
 - [ ] F5 — İzleme (watch, tail, TUI Textual gömülü arayüz)
@@ -16,4 +16,4 @@ Son güncelleme: 2026-10-29T12:13:00Z
 - Yok
 
 ## Sonraki adım
-F2 fazına geçmek: `src/agentbus/runner_agy.py` (tek tur çalıştırma, G1 Windows Job Object, G2 stdin besleme, G4 sonuç JSON ayrıştırma), `src/agentbus/supervisor.py` (paralellik 4, kalp atışı/kira yenileme, 429 geri çekilme, çöküş kurtarma) ve K1-K3 kabul testlerini yazmak.
+F3 fazına geçmek: `src/agentbus/worktree.py` (git worktree oluştur/kaldır, diff alma, allowed_paths G12 denetimi), iki aşamalı güvenli birleştirme (§15 / G6 / G7 rebase, Aşama 1 entegrasyon worktree'si, Aşama 2 yalnız fast-forward terfi) ve K-G6a..d testleri.

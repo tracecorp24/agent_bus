@@ -369,6 +369,71 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_up(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    if args.detach:
+        # Arka planda bağımsız süreç olarak başlat
+        cmd = [
+            sys.executable, "-m", "agentbus.cli",
+            "--home", str(home_dir),
+            "up",
+            "--parallel", str(args.parallel)
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+        )
+        if is_json_mode(args):
+            print(json.dumps({"status": "started", "pid": proc.pid, "detached": True}, indent=2))
+        else:
+            console.print(f"[bold green][OK] Supervisor arka planda baslatildi (PID: {proc.pid}).[/bold green]")
+        return 0
+
+    from agentbus.supervisor import Supervisor
+    sup = Supervisor(home_dir=home_dir, max_parallel=args.parallel)
+    if not is_json_mode(args):
+        console.print(f"[bold green]Supervisor baslatiliyor... (Paralel yuva: {args.parallel})[/bold green]")
+        console.print("Durdurmak icin Ctrl+C basin.")
+    try:
+        sup.start()
+    except KeyboardInterrupt:
+        if not is_json_mode(args):
+            console.print("\n[yellow]Supervisor durduruluyor...[/yellow]")
+        sup.stop()
+    except Exception as e:
+        err_console.print(f"[red]Supervisor hatasi: {e}[/red]")
+        return 1
+    return 0
+
+
+def cmd_down(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    conn = get_connection(get_db_path(get_home_arg(args)))
+    init_db(conn)
+    meta = MetaStore(conn)
+    meta.set("paused", "1")
+    if is_json_mode(args):
+        print(json.dumps({"status": "stopping", "paused": True}, indent=2))
+    else:
+        console.print("[yellow][OK] Supervisor'a durma sinyali gonderildi (paused=1).[/yellow]")
+        console.print("Calisan turlar bittiginde surecler duracaktir.")
+    return 0
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    home_dir = get_home_dir(get_home_arg(args))
+    from agentbus.supervisor import Supervisor
+    sup = Supervisor(home_dir=home_dir)
+    count = sup.recover()
+    if is_json_mode(args):
+        print(json.dumps({"status": "recovered", "recovered_jobs_count": count}, indent=2))
+    else:
+        console.print(f"[bold green][OK] Kurtarma taramasi tamamlandi. Kurtarilan is sayisi: {count}[/bold green]")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--home", type=str, default=None, help="Özel Agent Bus veri dizini (.data)")
@@ -417,6 +482,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_show.add_argument("--turns", action="store_true", help="Turları da listele")
     p_show.add_argument("--events", type=int, default=10, help="Son N olayı listele")
     p_show.set_defaults(func=cmd_show)
+
+    # up
+    p_up = subparsers.add_parser("up", parents=[common], help="Supervisor daemon'u başlatır")
+    p_up.add_argument("--parallel", type=int, default=4, help="Paralel işçi sayısı (en çok 4)")
+    p_up.add_argument("--detach", action="store_true", help="Arka planda bağımsız çalıştır")
+    p_up.set_defaults(func=cmd_up)
+
+    # down
+    p_down = subparsers.add_parser("down", parents=[common], help="Supervisor'ı nazikçe durdurur")
+    p_down.set_defaults(func=cmd_down)
+
+    # recover
+    p_rec = subparsers.add_parser("recover", parents=[common], help="Kira süresi geçmiş işleri kurtarır")
+    p_rec.set_defaults(func=cmd_recover)
 
     return parser
 

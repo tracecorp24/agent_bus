@@ -8,23 +8,23 @@ from agentbus.models import Job, JobStatus, utc_now_iso
 
 
 def generate_job_id(conn: sqlite3.Connection) -> str:
-    """j_YYYYMMDD_NNNN formatında benzersiz iş kimliği üretir."""
+    """j_YYYYMMDD_NNNN formatında atomik ve benzersiz iş kimliği üretir."""
     today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
     prefix = f"j_{today_str}_"
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id FROM jobs WHERE id LIKE ? ORDER BY id DESC LIMIT 1",
-        (f"{prefix}%",)
-    )
-    row = cursor.fetchone()
-    if row:
-        last_id = row["id"]
-        try:
-            seq = int(last_id.split("_")[-1]) + 1
-        except ValueError:
-            seq = 1
-    else:
-        seq = 1
+    meta_key = f"seq_{today_str}"
+
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO meta (key, value) VALUES (?, '1')
+            ON CONFLICT(key) DO UPDATE SET value = cast(value as integer) + 1
+            RETURNING value
+            """,
+            (meta_key,)
+        )
+        row = cursor.fetchone()
+        seq = int(row[0])
     return f"{prefix}{seq:04d}"
 
 
@@ -83,32 +83,41 @@ class JobsStore:
                 return existing
 
         now = utc_now_iso()
-        j_id = job_id or generate_job_id(self.conn)
         deps = json.dumps(depends_on or [])
         paths = json.dumps(allowed_paths or [])
 
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO jobs (
-                    id, title, task_md, parent_id, depends_on, status, priority,
-                    agent_profile, allowed_paths, idempotency_key, created_at, updated_at, repo
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    j_id, title, task_md, parent_id, deps, JobStatus.QUEUED.value,
-                    priority, agent_profile, paths, idempotency_key, now, now, repo
-                )
-            )
-            # Olay günlüğü
-            self.conn.execute(
-                """
-                INSERT INTO events (ts, job_id, type, level, payload_json)
-                VALUES (?, ?, 'job.created', 'info', ?)
-                """,
-                (now, j_id, json.dumps({"title": title, "priority": priority}))
-            )
-        return self.get_job(j_id)  # type: ignore
+        # Eşzamanlı oluşturmalarda ID çakışmasını önlemek için retry
+        for attempt in range(10):
+            j_id = job_id or generate_job_id(self.conn)
+            try:
+                with self.conn:
+                    self.conn.execute(
+                        """
+                        INSERT INTO jobs (
+                            id, title, task_md, parent_id, depends_on, status, priority,
+                            agent_profile, allowed_paths, idempotency_key, created_at, updated_at, repo
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            j_id, title, task_md, parent_id, deps, JobStatus.QUEUED.value,
+                            priority, agent_profile, paths, idempotency_key, now, now, repo
+                        )
+                    )
+                    # Olay günlüğü
+                    self.conn.execute(
+                        """
+                        INSERT INTO events (ts, job_id, type, level, payload_json)
+                        VALUES (?, ?, 'job.created', 'info', ?)
+                        """,
+                        (now, j_id, json.dumps({"title": title, "priority": priority}))
+                    )
+                return self.get_job(j_id)  # type: ignore
+            except sqlite3.IntegrityError as e:
+                if "UNIQUE constraint failed: jobs.id" in str(e) and not job_id:
+                    time.sleep(0.005 * (attempt + 1))
+                    continue
+                raise
+        raise RuntimeError("İş kimliği üretilemedi, çakışma aşılamadı.")
 
     def get_job(self, job_id: str) -> Optional[Job]:
         cursor = self.conn.cursor()

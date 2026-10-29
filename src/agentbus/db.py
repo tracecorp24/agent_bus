@@ -44,8 +44,9 @@ def get_connection(db_path: Optional[Path] = None, custom_home: Optional[str] = 
 
     conn = sqlite3.connect(
         str(db_path),
-        timeout=10.0,
-        isolation_level=None  # autocommit / explicit transaction kontrolü
+        timeout=30.0,
+        isolation_level=None,  # autocommit / explicit transaction kontrolü
+        check_same_thread=False  # Çoklu thread erişimine izin ver
     )
     conn.row_factory = sqlite3.Row
 
