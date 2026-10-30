@@ -1297,7 +1297,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common]
     )
 
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     # init
     p_init = subparsers.add_parser("init", parents=[common], help="Agent Bus veritabanını ve klasör yapısını kurar")
@@ -1514,6 +1514,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main():
     parser = build_parser()
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
     args = parser.parse_args()
     if not check_agent_role_guard(args.command, args):
         sys.exit(13)
@@ -1521,7 +1524,7 @@ def main():
         sys.exit(args.func(args))
     else:
         parser.print_help()
-        sys.exit(1)
+        sys.exit(0)
 
 
 if __name__ == "__main__":
