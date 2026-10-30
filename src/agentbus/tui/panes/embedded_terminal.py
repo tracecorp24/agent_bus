@@ -153,12 +153,13 @@ class EmbeddedTerminalWidget(Widget):
                 spawn_kwargs["env"] = self.env
             if self.cwd:
                 spawn_kwargs["cwd"] = self.cwd
-            self.pty = PtyProcess.spawn(self.shell_cmd, **spawn_kwargs)
+            exec_cmd = self.shell_cmd
+            if self.initial_command and self.shell_cmd == "cmd.exe":
+                exec_cmd = f"cmd.exe /k {self.initial_command}"
+            self.pty = PtyProcess.spawn(exec_cmd, **spawn_kwargs)
             self.running = True
             self.run_worker(self._pty_reader_loop, name="pty-reader", exclusive=False)
             self.set_interval(0.6, self._blink_cursor)
-            if self.initial_command:
-                self.run_worker(self._send_initial_command, name="send-init-cmd")
         except Exception:
             self.running = False
 
@@ -298,14 +299,20 @@ class EmbeddedTerminalWidget(Widget):
             self.pty.write(cmd_text + "\r\n")
             self.term_scroll_offset = 0
 
-    def restart_terminal(self) -> None:
-        """Restarts the PTY shell process with a clean screen."""
+    def terminate_process(self) -> None:
+        """Kalıntı bırakmadan PTY sürecini sonlandırır."""
         self.running = False
-        if self.pty and self.pty.isalive():
+        if self.pty:
             try:
-                self.pty.terminate()
+                if self.pty.isalive():
+                    self.pty.terminate()
+                self.pty.close()
             except Exception:
                 pass
+
+    def restart_terminal(self) -> None:
+        """Restarts the PTY shell process with a clean screen."""
+        self.terminate_process()
 
         if HAS_WINPTY:
             self.screen_model = pyte.HistoryScreen(self.cols, self.rows, history=500)
@@ -316,7 +323,10 @@ class EmbeddedTerminalWidget(Widget):
                     spawn_kwargs["env"] = self.env
                 if self.cwd:
                     spawn_kwargs["cwd"] = self.cwd
-                self.pty = PtyProcess.spawn(self.shell_cmd, **spawn_kwargs)
+                exec_cmd = self.shell_cmd
+                if self.initial_command and self.shell_cmd == "cmd.exe":
+                    exec_cmd = f"cmd.exe /k {self.initial_command}"
+                self.pty = PtyProcess.spawn(exec_cmd, **spawn_kwargs)
                 self.running = True
                 self.run_worker(self._pty_reader_loop, name="pty-reader", exclusive=False)
             except Exception:
